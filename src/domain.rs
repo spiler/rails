@@ -103,17 +103,23 @@ impl From<TransactionRequest> for Transaction {
 
 impl TransactionRequest {
     pub fn valid_transaction(&self) -> Result<Transaction, ServiceError> {
-        if self.amount.is_some() {
-            let amount_opt = self.amount.to_owned();
-            let val: BigDecimal = amount_opt.unwrap();
-            if val.round(ROUND_DIGITS).ne(&val.clone()) {
-                return Err(ServiceError::GenericErrorMsg("Invalid transaction amount.".to_string()));
+
+        match &self.amount {
+            None => Ok(()),
+            Some(value) => {
+                if value.round(ROUND_DIGITS).ne(&value.clone()) {
+                    Err(ServiceError::GenericErrorMsg("Invalid transaction amount.".to_string()))
+                } else {
+                    Ok(())
+                }
             }
-        }
-        match self.transaction_type.is_some() && self.transaction_id.is_some() {
-            true => Ok(Transaction::from(self.to_owned())),
-            false => Err(ServiceError::GenericErrorMsg("Invalid transaction request.".to_string()))
-        }
+        }.and_then(|_| {
+            match self.transaction_type.is_some() && self.transaction_id.is_some() {
+                true => Ok(Transaction::from(self.to_owned())),
+                false => Err(ServiceError::GenericErrorMsg("Invalid transaction request.".to_string()))
+            }
+        })//.or_else(|err| return Err(err))
+
     }
 }
 
@@ -353,7 +359,7 @@ impl<AccRep, TxRep> TransactionService<AccRep, TxRep>
             }
         };
 
-        let amount_opt = ref_transaction.amount.to_owned();
+        let amount_opt = ref_transaction.amount();
         let amount = match amount_opt {
             None => return Err(GenericErrorMsg(format!("The requested transaction id does not specify an amount. {}", transaction.transaction_id))),
             Some(amount) => {
