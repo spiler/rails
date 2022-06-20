@@ -191,17 +191,16 @@ pub struct TransactionService<AccRep, TxRep>
 
 /// Kind of a business util function. Sanitizes the transaction amount by checking preconditions.
 fn sanitize_transaction_amount(transaction: &Transaction) -> Result<Amount, ServiceError> {
-    let amount_opt = transaction.amount.to_owned();
-    if amount_opt.is_none() {
-        return Err(GenericErrorMsg(std::format!("Invalid deposit tx: {}", transaction.transaction_id())));
+    match transaction.amount.to_owned() {
+        None => Err(GenericErrorMsg(std::format!("Invalid deposit tx: {}", transaction.transaction_id()))),
+        Some(amount) => {
+            if amount.is_negative() {
+                Err(GenericErrorMsg(std::format!("Invalid deposit tx: {}", transaction.transaction_id())))
+            } else {
+                Ok(amount)
+            }
+        }
     }
-    let amount = amount_opt.unwrap();
-
-    if amount.is_negative() {
-        return Err(GenericErrorMsg(std::format!("Invalid deposit tx: {}", transaction.transaction_id())));
-    }
-
-    Ok(amount)
 }
 
 impl<AccRep, TxRep> TransactionService<AccRep, TxRep>
@@ -225,8 +224,9 @@ impl<AccRep, TxRep> TransactionService<AccRep, TxRep>
         let f = |account : &Account| {
             report.add(&account);
         };
-        self.account_repository.account_visitor(f).unwrap();
-        Ok(())
+        self.account_repository
+            .account_visitor(f)
+            .or_else( |err| Err(GenericErrorMsg(format!("Error accessing account repository. {:?}", err))))
     }
     pub fn process_transactions(&mut self, transaction_iter: impl Iterator<Item=TransactionRequest>) -> Result<(), ServiceError> {
         for tx in transaction_iter {
@@ -298,26 +298,29 @@ impl<AccRep, TxRep> TransactionService<AccRep, TxRep>
 
         // The reference transaction must exist
         let ref_transaction_opt = self.transaction_repository.find_transaction_by_id(&transaction.transaction_id)?;
-        if ref_transaction_opt.is_none() {
-            return Err(GenericErrorMsg(format!("The requested transaction id does not exist. {}", transaction.transaction_id)));
-        }
-
+        let ref_transaction = match ref_transaction_opt {
+            None => return Err(GenericErrorMsg(format!("The requested transaction id does not exist. {}", transaction.transaction_id))),
+            Some(ref_transaction) => {
+                if !matches!(ref_transaction.dispute, TransactionDispute::Disputed) {
+                    return Err(GenericErrorMsg(format!("The requested transaction is not disputed. {}", transaction.transaction_id)));
+                } else {
+                    ref_transaction
+                }
+            }
+        };
         // The reference transaction preconditions are that this tx must be in "Disputed" status.
-        let ref_transaction = ref_transaction_opt.unwrap();
-        if !matches!(ref_transaction.dispute, TransactionDispute::Disputed) {
-            return Err(GenericErrorMsg(format!("The requested transaction is not disputed. {}", transaction.transaction_id)));
-        }
 
         let amount_opt = ref_transaction.amount.to_owned();
-        if amount_opt.is_none() {
-            return Err(GenericErrorMsg(format!("The requested transaction id does not specify an amount. {}", transaction.transaction_id)));
-        }
-
-        let amount = amount_opt.unwrap();
-
-        if amount.gt(&account.held) {
-            return Ok(TransactionStatus::Error);
-        }
+        let amount = match amount_opt {
+            None => return Err(GenericErrorMsg(format!("The requested transaction id does not specify an amount. {}", transaction.transaction_id))),
+            Some(amount) => {
+                if amount.gt(&account.held) {
+                    return Ok(TransactionStatus::Error);
+                } else {
+                    amount
+                }
+            }
+        };
 
         let mut update = account.clone();
         update.held = update.held.sub(&amount).round(ROUND_DIGITS);
@@ -339,25 +342,28 @@ impl<AccRep, TxRep> TransactionService<AccRep, TxRep>
 
         let ref_transaction_opt = self.transaction_repository.find_transaction_by_id(&transaction.transaction_id)?;
 
-        if ref_transaction_opt.is_none() {
-            return Err(GenericErrorMsg(format!("The requested transaction id does not exist. {}", transaction.transaction_id)));
-        }
-
-        let ref_transaction = ref_transaction_opt.unwrap();
-        if !matches!(ref_transaction.dispute, TransactionDispute::Disputed) {
-            return Err(GenericErrorMsg(format!("The requested transaction is not disputed. {}", transaction.transaction_id)));
-        }
+        let ref_transaction = match ref_transaction_opt {
+            None => return Err(GenericErrorMsg(format!("The requested transaction id does not exist. {}", transaction.transaction_id))),
+            Some(ref_transaction) => {
+                if !matches!(ref_transaction.dispute, TransactionDispute::Disputed) {
+                    return Err(GenericErrorMsg(format!("The requested transaction is not disputed. {}", transaction.transaction_id)));
+                } else {
+                    ref_transaction
+                }
+            }
+        };
 
         let amount_opt = ref_transaction.amount.to_owned();
-        if amount_opt.is_none() {
-            return Err(GenericErrorMsg(format!("The requested transaction id does not specify an amount. {}", transaction.transaction_id)));
-        }
-
-        let amount = amount_opt.unwrap();
-
-        if amount.gt(&account.held) {
-            return Ok(TransactionStatus::Error);
-        }
+        let amount = match amount_opt {
+            None => return Err(GenericErrorMsg(format!("The requested transaction id does not specify an amount. {}", transaction.transaction_id))),
+            Some(amount) => {
+                if amount.gt(&account.held) {
+                    return Ok(TransactionStatus::Error);
+                } else {
+                    amount
+                }
+            }
+        };
 
         let mut update = account.clone();
         update.available = update.available.add(&amount).round(ROUND_DIGITS);
@@ -378,30 +384,29 @@ impl<AccRep, TxRep> TransactionService<AccRep, TxRep>
         }
 
         let ref_transaction_opt = self.transaction_repository.find_transaction_by_id(&transaction.transaction_id)?;
+        let (ref_transaction, amount) = match ref_transaction_opt {
+            None => return Err(GenericErrorMsg(format!("The requested transaction id does not exist. {}", transaction.transaction_id))),
+            Some(ref_transaction) => {
+                match ref_transaction.dispute {
+                    TransactionDispute::Disputed | TransactionDispute::Chargeback => {
+                        return Err(GenericErrorMsg(format!("The requested transaction id is in dispute status and is immutable until resolution. {}", transaction.transaction_id)));
+                    }
+                    TransactionDispute::No | TransactionDispute::Resolved => (),
+                };
 
-        if ref_transaction_opt.is_none() {
-            return Err(GenericErrorMsg(format!("The requested transaction id does not exist. {}", transaction.transaction_id)));
-        }
-
-        let ref_transaction = ref_transaction_opt.unwrap();
-        match ref_transaction.dispute {
-            TransactionDispute::Disputed | TransactionDispute::Chargeback => {
-                return Err(GenericErrorMsg(format!("The requested transaction id is in dispute status and is immutable until resolution. {}", transaction.transaction_id)));
+                let amount = match ref_transaction.amount() {
+                    // This should never happen, if this happens the repository is corrupted.
+                    None => return Err(GenericErrorMsg(format!("The requested transaction id does not specify an amount. {}", transaction.transaction_id))),
+                    Some(amount) => {
+                        if amount.gt(&account.available) {
+                            return Ok(TransactionStatus::Error);
+                        }
+                        amount
+                    }
+                };
+                (ref_transaction, amount)
             }
-            TransactionDispute::No | TransactionDispute::Resolved => (),
         };
-
-        let amount_opt = ref_transaction.amount();
-        if amount_opt.is_none() {
-            // This should never happen, if this happens the repository is corrupted.
-            return Err(GenericErrorMsg(format!("The requested transaction id does not specify an amount. {}", transaction.transaction_id)));
-        }
-
-        let amount = amount_opt.unwrap();
-
-        if amount.gt(&account.available) {
-            return Ok(TransactionStatus::Error);
-        }
 
         let mut update = account.clone();
         update.available = update.available.sub(&amount).round(ROUND_DIGITS);
